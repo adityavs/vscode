@@ -155,6 +155,8 @@ class TextModelSnapshot implements ITextSnapshot {
 export class TextModel extends Disposable implements model.ITextModel {
 
 	private static readonly MODEL_SYNC_LIMIT = 50 * 1024 * 1024; // 50 MB
+	private static readonly LARGE_FILE_SIZE_THRESHOLD = 20 * 1024 * 1024; // 20 MB;
+	private static readonly LARGE_FILE_LINE_COUNT_THRESHOLD = 300 * 1000; // 300K lines
 
 	public static DEFAULT_CREATION_OPTIONS: model.ITextModelCreationOptions = {
 		isForSimpleWidget: false,
@@ -163,8 +165,7 @@ export class TextModel extends Disposable implements model.ITextModel {
 		detectIndentation: false,
 		defaultEOL: model.DefaultEndOfLine.LF,
 		trimAutoWhitespace: EDITOR_MODEL_DEFAULTS.trimAutoWhitespace,
-		largeFileSize: EDITOR_MODEL_DEFAULTS.largeFileSize,
-		largeFileLineCount: EDITOR_MODEL_DEFAULTS.largeFileLineCount,
+		largeFileOptimizations: EDITOR_MODEL_DEFAULTS.largeFileOptimizations,
 	};
 
 	public static createFromString(text: string, options: model.ITextModelCreationOptions = TextModel.DEFAULT_CREATION_OPTIONS, languageIdentifier: LanguageIdentifier = null, uri: URI = null): TextModel {
@@ -236,7 +237,7 @@ export class TextModel extends Disposable implements model.ITextModel {
 	 * Unlike, versionId, this can go down (via undo) or go to previous values (via redo)
 	 */
 	private _alternativeVersionId: number;
-	private readonly _shouldSimplifyMode: boolean;
+	private readonly _isTooLargeForSyncing: boolean;
 	private readonly _isTooLargeForTokenization: boolean;
 
 	//#region Editing
@@ -285,18 +286,20 @@ export class TextModel extends Disposable implements model.ITextModel {
 
 		const bufferLineCount = this._buffer.getLineCount();
 		const bufferTextLength = this._buffer.getValueLengthInRange(new Range(1, 1, bufferLineCount, this._buffer.getLineLength(bufferLineCount) + 1), model.EndOfLinePreference.TextDefined);
+
 		// !!! Make a decision in the ctor and permanently respect this decision !!!
 		// If a model is too large at construction time, it will never get tokenized,
 		// under no circumstances.
-		this._isTooLargeForTokenization = (
-			(bufferTextLength > creationOptions.largeFileSize)
-			|| (bufferLineCount > creationOptions.largeFileLineCount)
-		);
+		if (creationOptions.largeFileOptimizations) {
+			this._isTooLargeForTokenization = (
+				(bufferTextLength > TextModel.LARGE_FILE_SIZE_THRESHOLD)
+				|| (bufferLineCount > TextModel.LARGE_FILE_LINE_COUNT_THRESHOLD)
+			);
+		} else {
+			this._isTooLargeForTokenization = false;
+		}
 
-		this._shouldSimplifyMode = (
-			this._isTooLargeForTokenization
-			|| (bufferTextLength > TextModel.MODEL_SYNC_LIMIT)
-		);
+		this._isTooLargeForSyncing = (bufferTextLength > TextModel.MODEL_SYNC_LIMIT);
 
 		this._setVersionId(1);
 		this._isDisposed = false;
@@ -541,8 +544,8 @@ export class TextModel extends Disposable implements model.ITextModel {
 		return this._attachedEditorCount;
 	}
 
-	public isTooLargeForHavingARichMode(): boolean {
-		return this._shouldSimplifyMode;
+	public isTooLargeForSyncing(): boolean {
+		return this._isTooLargeForSyncing;
 	}
 
 	public isTooLargeForTokenization(): boolean {
@@ -2041,25 +2044,13 @@ export class TextModel extends Disposable implements model.ITextModel {
 			// limit search to not go after `maxBracketLength`
 			const searchEndOffset = Math.min(lineTokens.getEndOffset(tokenIndex), position.column - 1 + currentModeBrackets.maxBracketLength);
 
-			// first, check if there is a bracket to the right of `position`
-			let foundBracket = BracketsUtils.findNextBracketInToken(currentModeBrackets.forwardRegex, lineNumber, lineText, position.column - 1, searchEndOffset);
-			if (foundBracket && foundBracket.startColumn === position.column) {
-				let foundBracketText = lineText.substring(foundBracket.startColumn - 1, foundBracket.endColumn - 1);
-				foundBracketText = foundBracketText.toLowerCase();
-
-				let r = this._matchFoundBracket(foundBracket, currentModeBrackets.textIsBracket[foundBracketText], currentModeBrackets.textIsOpenBracket[foundBracketText]);
-
-				// check that we can actually match this bracket
-				if (r) {
-					return r;
-				}
-			}
-
-			// it might still be the case that [currentTokenStart -> currentTokenEnd] contains multiple brackets
+			// it might be the case that [currentTokenStart -> currentTokenEnd] contains multiple brackets
+			// `bestResult` will contain the most right-side result
+			let bestResult: [Range, Range] = null;
 			while (true) {
 				let foundBracket = BracketsUtils.findNextBracketInToken(currentModeBrackets.forwardRegex, lineNumber, lineText, searchStartOffset, searchEndOffset);
 				if (!foundBracket) {
-					// there are no brackets in this text
+					// there are no more brackets in this text
 					break;
 				}
 
@@ -2072,11 +2063,15 @@ export class TextModel extends Disposable implements model.ITextModel {
 
 					// check that we can actually match this bracket
 					if (r) {
-						return r;
+						bestResult = r;
 					}
 				}
 
 				searchStartOffset = foundBracket.endColumn - 1;
+			}
+
+			if (bestResult) {
+				return bestResult;
 			}
 		}
 
@@ -2394,7 +2389,7 @@ export class TextModel extends Disposable implements model.ITextModel {
 		return TextModel.computeIndentLevel(this._buffer.getLineContent(lineIndex + 1), this._options.tabSize);
 	}
 
-	public getActiveIndentGuide(lineNumber: number): model.IActiveIndentGuideInfo {
+	public getActiveIndentGuide(lineNumber: number, minLineNumber: number, maxLineNumber: number): model.IActiveIndentGuideInfo {
 		this._assertNotDisposed();
 		const lineCount = this.getLineCount();
 
@@ -2487,10 +2482,15 @@ export class TextModel extends Disposable implements model.ITextModel {
 			const upLineNumber = lineNumber - distance;
 			const downLineNumber = lineNumber + distance;
 
-			if (upLineNumber < 1) {
+			if (upLineNumber < 1 || upLineNumber < minLineNumber) {
 				goUp = false;
 			}
-			if (downLineNumber > lineCount) {
+			if (downLineNumber > lineCount || downLineNumber > maxLineNumber) {
+				goDown = false;
+			}
+			if (distance > 50000) {
+				// stop processing
+				goUp = false;
 				goDown = false;
 			}
 

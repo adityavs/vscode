@@ -42,14 +42,19 @@ export interface IFileService {
 	onAfterOperation: Event<FileOperationEvent>;
 
 	/**
+	 * An event that is fired when a file system provider is added or removed
+	 */
+	onDidChangeFileSystemProviderRegistrations: Event<IFileSystemProviderRegistrationEvent>;
+
+	/**
 	 * Registeres a file system provider for a certain scheme.
 	 */
-	registerProvider?(scheme: string, provider: IFileSystemProvider): IDisposable;
+	registerProvider(scheme: string, provider: IFileSystemProvider): IDisposable;
 
 	/**
 	 * Checks if this file service can handle the given resource.
 	 */
-	canHandleResource?(resource: URI): boolean;
+	canHandleResource(resource: URI): boolean;
 
 	/**
 	 * Resolve the properties of a file identified by the resource.
@@ -150,44 +155,32 @@ export interface IFileService {
 	dispose(): void;
 }
 
-export enum FileType2 {
-	File = 1,
-	Directory = 2,
-	SymbolicLink = 4,
+export interface FileOverwriteOptions {
+	overwrite: boolean;
 }
 
-export interface FileOptions {
-	/**
-	 * Create a file when it doesn't exists.
-	 */
-	create?: boolean;
+export interface FileWriteOptions {
+	overwrite: boolean;
+	create: boolean;
+}
 
-	/**
-	 * In combination with [`create`](FileOptions.create) but
-	 * the operation should fail when a file already exists.
-	 */
-	exclusive?: boolean;
-
-	/**
-	 * Open a file for reading.
-	 */
-	read?: boolean;
-
-	/**
-	 * Open a file for writing.
-	 */
-	write?: boolean;
+export enum FileType {
+	Unknown = 0,
+	File = 1,
+	Directory = 2,
+	SymbolicLink = 64
 }
 
 export interface IStat {
+	type: FileType;
 	mtime: number;
+	ctime: number;
 	size: number;
-	type: FileType2;
 }
 
 export interface IWatchOptions {
-	recursive?: boolean;
-	exclude?: string[];
+	recursive: boolean;
+	excludes: string[];
 }
 
 export enum FileSystemProviderCapabilities {
@@ -206,20 +199,26 @@ export interface IFileSystemProvider {
 	watch(resource: URI, opts: IWatchOptions): IDisposable;
 
 	stat(resource: URI): TPromise<IStat>;
-	mkdir(resource: URI): TPromise<IStat>;
-	readdir(resource: URI): TPromise<[string, IStat][]>;
+	mkdir(resource: URI): TPromise<void>;
+	readdir(resource: URI): TPromise<[string, FileType][]>;
 	delete(resource: URI): TPromise<void>;
 
-	rename(from: URI, to: URI, opts: FileOptions): TPromise<IStat>;
-	copy?(from: URI, to: URI, opts: FileOptions): TPromise<IStat>;
+	rename(from: URI, to: URI, opts: FileOverwriteOptions): TPromise<void>;
+	copy?(from: URI, to: URI, opts: FileOverwriteOptions): TPromise<void>;
 
-	readFile?(resource: URI, opts: FileOptions): TPromise<Uint8Array>;
-	writeFile?(resource: URI, content: Uint8Array, opts: FileOptions): TPromise<void>;
+	readFile?(resource: URI): TPromise<Uint8Array>;
+	writeFile?(resource: URI, content: Uint8Array, opts: FileWriteOptions): TPromise<void>;
 
-	open?(resource: URI, opts: FileOptions): TPromise<number>;
+	open?(resource: URI): TPromise<number>;
 	close?(fd: number): TPromise<void>;
 	read?(fd: number, pos: number, data: Uint8Array, offset: number, length: number): TPromise<number>;
 	write?(fd: number, pos: number, data: Uint8Array, offset: number, length: number): TPromise<number>;
+}
+
+export interface IFileSystemProviderRegistrationEvent {
+	added: boolean;
+	scheme: string;
+	provider?: IFileSystemProvider;
 }
 
 export enum FileOperation {

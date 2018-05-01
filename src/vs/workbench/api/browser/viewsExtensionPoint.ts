@@ -79,6 +79,18 @@ namespace schema {
 				type: 'array',
 				items: viewDescriptor,
 				default: []
+			},
+			'scm': {
+				description: localize('views.scm', "Contributes views to SCM container in the Activity bar"),
+				type: 'array',
+				items: viewDescriptor,
+				default: []
+			},
+			'test': {
+				description: localize('views.test', "Contributes views to Test container in the Activity bar"),
+				type: 'array',
+				items: viewDescriptor,
+				default: []
 			}
 		},
 		additionalProperties: {
@@ -94,7 +106,8 @@ function getViewLocation(value: string): ViewLocation {
 	switch (value) {
 		case 'explorer': return ViewLocation.Explorer;
 		case 'debug': return ViewLocation.Debug;
-		default: return ViewLocation.get(`workbench.view.extension.${value}`) || ViewLocation.Explorer;
+		case 'scm': return ViewLocation.SCM;
+		default: return ViewLocation.get(`workbench.view.extension.${value}`);
 	}
 }
 
@@ -108,7 +121,11 @@ ExtensionsRegistry.registerExtensionPoint<{ [loc: string]: schema.IUserFriendlyV
 					return;
 				}
 
-				const location = getViewLocation(entry.key);
+				let location = getViewLocation(entry.key);
+				if (!location) {
+					collector.warn(localize('ViewContainerDoesnotExist', "View container '{0}' does not exist and all views registered to it will be added to 'Explorer'.", entry.key));
+					location = ViewLocation.Explorer;
+				}
 				const registeredViews = ViewsRegistry.getViews(location);
 				const viewIds = [];
 				const viewDescriptors = coalesce(entry.value.map(item => {
